@@ -1,9 +1,8 @@
 import chai, {expect} from 'chai';
 import chaiAsPromised from 'chai-as-promised';
-import {createMockProvider, deployContract, getWallets, loadFixture, solidity} from 'ethereum-waffle';
-import ERC1077 from '../../build/ERC1077';
+import {solidity, getWallets, loadFixture} from 'ethereum-waffle';
 import basicWallet, {transferMessage, failedTransferMessage, callMessage, failedCallMessage} from '../fixtures/basicWallet';
-import {constants, utils} from 'ethers';
+import {utils} from 'ethers';
 import {calculateMessageHash, calculateMessageSignature, concatenateSignatures} from '../../lib/calculateMessageSignature';
 import DEFAULT_PAYMENT_OPTIONS from '../../lib/defaultPaymentOptions';
 import {getExecutionArgs} from '../utils';
@@ -15,29 +14,6 @@ const {parseEther} = utils;
 const to = '0x0000000000000000000000000000000000000001';
 const {gasPrice} = DEFAULT_PAYMENT_OPTIONS;
 const overrideOptions = {gasPrice, gasLimit: 200000};
-
-describe('Void ERC1077', () => {
-  let provider;
-  let identityWithZeroKey;
-  let privateKey;
-  let signature;
-  let msg;
-  let wallet;
-
-  beforeEach(async () => {
-    provider = createMockProvider();
-    [, , , , , , , , , wallet] = getWallets(provider);
-    identityWithZeroKey = await deployContract(wallet, ERC1077, [constants.AddressZero]);
-  });
-
-  it('execute signed fails', async () => {
-    signature = [];
-    msg = {...transferMessage, from: identityWithZeroKey.address};
-    privateKey = wallet.privateKey;
-    await expect(identityWithZeroKey.executeSigned(...getExecutionArgs(msg), signature, overrideOptions))
-      .to.be.revertedWith('Invalid signature');
-  });
-});
 
 describe('ERC1077', async  () => {
   let provider;
@@ -69,6 +45,7 @@ describe('ERC1077', async  () => {
   describe('construction', () => {
     it('properly construct', async () => {
       expect(await identity.lastNonce()).to.eq(0);
+      expect(await identity.requiredSignatures()).to.eq(1);
     });
 
     it('first key exist', async () => {
@@ -80,6 +57,28 @@ describe('ERC1077', async  () => {
     });
   });
 
+  describe('change required signatures per transaction', async () => {
+    it('should change the number of required signatures successfully', async () => {
+        await identity.setRequiredSignatures(2);
+        expect(await identity.requiredSignatures()).to.eq(2);
+    });
+
+    it('should change the number of required signatures to keyCount', async () => {
+        await identity.setRequiredSignatures(await identity.keyCount());
+        expect(await identity.requiredSignatures()).to.eq(await identity.keyCount());
+    });
+    it('shouldnt change the amount of required signatures if the amount is equal to the actual amount', async () => {
+        await expect(identity.setRequiredSignatures(1)).to.be.revertedWith('Invalid required signature');
+    });
+
+    it('shouldnt change the amount of required signatures if the new amount 0', async () => {
+        await expect(identity.setRequiredSignatures(0)).to.be.revertedWith('Invalid required signature');
+    });
+
+    it('shouldnt change the amount of required signatures if the new amount is higher than keyCount', async () => {
+        await expect(identity.setRequiredSignatures(await identity.keyCount() + 1)).to.be.revertedWith('Signatures exceed owned keys number');
+    });
+  });
   describe('signing message', () => {
     it('calculates hash', async () => {
       const jsHash = calculateMessageHash(msg);
@@ -258,6 +257,13 @@ describe('ERC1077', async  () => {
           .to.emit(identity, 'ExecutedSigned')
           .withArgs(messageHash, 0, true);
       });
+
+      it('with 2 required Signature', async () => {
+        await identity.setRequiredSignatures(2);
+        expect(await mockContract.wasCalled()).to.be.false;
+        await identity.executeSigned(...getExecutionArgs(msgToCall), signatures, overrideOptions);
+        expect(await mockContract.wasCalled()).to.be.true;
+      });
     });
 
     describe('failed execution of call via multi-signature', async () => {
@@ -291,8 +297,16 @@ describe('ERC1077', async  () => {
         await expect(identity.executeSigned(...getExecutionArgs(msgToCall), '0x', overrideOptions))
           .to.be.revertedWith('Invalid signature');
       });
-    });
 
+      it('with not enough signatures', async () => {
+        signatures = await calculateMessageSignature(sortedKeys[0], msgToCall);
+        await identity.setRequiredSignatures(3);
+        expect(await mockContract.wasCalled()).to.be.false;
+        await expect(identity.executeSigned(...getExecutionArgs(msgToCall), signatures, overrideOptions))
+          .to.be.revertedWith('Not enough signatures');
+        expect(await mockContract.wasCalled()).to.be.false;
+      });
+    });
   });
 
   describe('Multi-Signature call with 3 signatures', async () => {
@@ -319,6 +333,13 @@ describe('ERC1077', async  () => {
         expect(await identity.lastNonce()).to.eq(1);
       });
 
+      it('with 3 required Signature', async () => {
+        await identity.setRequiredSignatures(3);
+        expect(await mockContract.wasCalled()).to.be.false;
+        await identity.executeSigned(...getExecutionArgs(msgToCall), signatures, overrideOptions);
+        expect(await mockContract.wasCalled()).to.be.true;
+      });
+
       it('should emit ExecutedSigned', async () => {
         const messageHash = calculateMessageHash(msgToCall);
         await expect(identity.executeSigned(...getExecutionArgs(msgToCall), signatures, overrideOptions))
@@ -330,7 +351,8 @@ describe('ERC1077', async  () => {
         msgToCall = {...callMessage, from: identity.address, to: mockContract.address};
         const signature1 = await calculateMessageSignature(sortedKeys[0], msgToCall);
         const signature2 = await calculateMessageSignature(sortedKeys[1], msgToCall);
-        signatures = concatenateSignatures([signature2, signature1]);
+        const signature3 = await calculateMessageSignature(sortedKeys[2], msgToCall);
+        signatures = concatenateSignatures([signature2, signature1, signature3]);
         await expect(identity.executeSigned(...getExecutionArgs(msgToCall), signatures, overrideOptions))
           .to.be.revertedWith('Invalid signature');
       });
